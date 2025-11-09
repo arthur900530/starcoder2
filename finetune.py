@@ -1,21 +1,20 @@
 # Code adapted from https://github.com/huggingface/trl/blob/main/examples/research_projects/stack_llama/scripts/supervised_finetuning.py
-# and https://huggingface.co/blog/gemma-peft
 import argparse
 import multiprocessing
 import os
 
 import torch
-import transformers
 from accelerate import PartialState
 from datasets import load_dataset
 from peft import LoraConfig
 from transformers import (
     AutoModelForCausalLM,
+    AutoTokenizer,
     BitsAndBytesConfig,
     logging,
     set_seed,
 )
-from trl import SFTTrainer
+from trl import SFTTrainer, SFTConfig
 
 
 def get_args():
@@ -40,7 +39,7 @@ def get_args():
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--output_dir", type=str, default="finetune_starcoder2")
     parser.add_argument("--num_proc", type=int, default=None)
-    parser.add_argument("--push_to_hub", type=bool, default=True)
+    parser.add_argument("--push_to_hub", type=bool, default=False)
     return parser.parse_args()
 
 
@@ -80,14 +79,19 @@ def main(args):
         task_type="CAUSAL_LM",
     )
 
-    # load model and dataset
+    # load model and tokenizer
     token = os.environ.get("HF_TOKEN", None)
     model = AutoModelForCausalLM.from_pretrained(
         args.model_id,
         quantization_config=bnb_config,
         device_map={"": PartialState().process_index},
         attention_dropout=args.attention_dropout,
+        token=token,
     )
+    
+    tokenizer = AutoTokenizer.from_pretrained(args.model_id, token=token)
+    tokenizer.pad_token = tokenizer.eos_token
+    
     print_trainable_parameters(model)
 
     data = load_dataset(
@@ -98,30 +102,35 @@ def main(args):
         num_proc=args.num_proc if args.num_proc else multiprocessing.cpu_count(),
     )
 
-    # setup the trainer
+    # Create SFTConfig with dataset-specific parameters
+    training_args = SFTConfig(
+        output_dir=args.output_dir,
+        per_device_train_batch_size=args.micro_batch_size,
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
+        warmup_steps=args.warmup_steps,
+        max_steps=args.max_steps,
+        learning_rate=args.learning_rate,
+        lr_scheduler_type=args.lr_scheduler_type,
+        weight_decay=args.weight_decay,
+        bf16=args.bf16,
+        logging_strategy="steps",
+        logging_steps=10,
+        optim="paged_adamw_8bit",
+        seed=args.seed,
+        report_to="none",
+        # SFT-specific parameters
+        max_seq_length=args.max_seq_length,
+        dataset_text_field=args.dataset_text_field,
+        packing=False,
+    )
+
+    # setup the trainer - simplified parameters
     trainer = SFTTrainer(
         model=model,
+        args=training_args,
         train_dataset=data,
-        max_seq_length=args.max_seq_length,
-        args=transformers.TrainingArguments(
-            per_device_train_batch_size=args.micro_batch_size,
-            gradient_accumulation_steps=args.gradient_accumulation_steps,
-            warmup_steps=args.warmup_steps,
-            max_steps=args.max_steps,
-            learning_rate=args.learning_rate,
-            lr_scheduler_type=args.lr_scheduler_type,
-            weight_decay=args.weight_decay,
-            bf16=args.bf16,
-            logging_strategy="steps",
-            logging_steps=10,
-            output_dir=args.output_dir,
-            optim="paged_adamw_8bit",
-            seed=args.seed,
-            run_name=f"train-{args.model_id.split('/')[-1]}",
-            report_to="wandb",
-        ),
         peft_config=lora_config,
-        dataset_text_field=args.dataset_text_field,
+        processing_class=tokenizer,
     )
 
     # launch
