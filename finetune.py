@@ -15,6 +15,7 @@ from transformers import (
     set_seed,
 )
 from trl import SFTTrainer, SFTConfig, DPOTrainer, DPOConfig
+import wandb
 
 def get_args():
     parser = argparse.ArgumentParser()
@@ -51,6 +52,12 @@ def get_args():
     parser.add_argument("--num_proc", type=int, default=None)
     
     parser.add_argument("--push_to_hub", action="store_true")
+
+    parser.add_argument("--use_wandb", action="store_true", help="Enable Weights & Biases logging")
+
+    parser.add_argument("--wandb_project", type=str, default="starcoder2-finetuning", help="Wandb project name")
+    parser.add_argument("--wandb_run_name", type=str, default=None, help="Wandb run name")
+    parser.add_argument("--wandb_entity", type=str, default=None, help="Wandb entity (username or team)")
 
     return parser.parse_args()
 
@@ -108,6 +115,14 @@ def main(args):
     
     print_trainable_parameters(model)
 
+    if args.use_wandb:
+        wandb.init(
+            project=args.wandb_project,
+            name=args.wandb_run_name,
+            entity=args.wandb_entity,
+            config=vars(args),  # Log all hyperparameters
+        )
+
     data = load_dataset(
         args.dataset_name,
         data_dir=args.subset,
@@ -132,7 +147,7 @@ def main(args):
             logging_steps=10,
             optim="paged_adamw_8bit",
             seed=args.seed,
-            report_to="none",
+            report_to="wandb" if args.use_wandb else "none",
             # SFT-specific parameters
             max_seq_length=args.max_seq_length,
             dataset_text_field=args.dataset_text_field,
@@ -153,7 +168,7 @@ def main(args):
             token=token,
         )
         ref_model.requires_grad_(False)
-        
+
         training_args = DPOConfig(
             output_dir=args.output_dir,
             per_device_train_batch_size=args.micro_batch_size,
@@ -168,7 +183,7 @@ def main(args):
             logging_steps=10,
             optim="paged_adamw_8bit",
             seed=args.seed,
-            report_to="none",
+            report_to="wandb" if args.use_wandb else "none",
             beta=args.dpo_beta,  # DPO-specific: temperature parameter
             max_prompt_length=args.max_prompt_length,
             max_length=args.max_seq_length,
@@ -191,6 +206,9 @@ def main(args):
     model.save_pretrained(os.path.join(args.output_dir, "final_checkpoint/"))
     if args.push_to_hub:
         trainer.push_to_hub("Upload model")
+    if args.use_wandb:
+        wandb.finish()
+
     print("Training Done! 💥")
 
 
