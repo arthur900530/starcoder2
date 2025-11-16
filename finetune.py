@@ -131,6 +131,18 @@ def main(args):
         num_proc=args.num_proc if args.num_proc else multiprocessing.cpu_count(),
     )
 
+    if args.training_type == "dpo" and args.dataset_name == "coseal/CodeUltraFeedback_binarized":
+        def format_dpo_dataset(example):
+            return {
+                "prompt": example["instruction"],
+                "chosen": example["chosen"],
+                "rejected": example["rejected"]
+            }
+        
+        data = data.map(format_dpo_dataset, remove_columns=data.column_names)
+        print("Preprocessed DPO dataset columns:", data.column_names)
+        print("Sample:", data[0])
+
 
     if args.training_type == "sft":
         training_args = SFTConfig(
@@ -157,18 +169,9 @@ def main(args):
             args=training_args,
             train_dataset=data,
             peft_config=lora_config,
-            # max_seq_length=args.max_seq_length,
             processing_class=tokenizer,
         )
     else:
-        ref_model = AutoModelForCausalLM.from_pretrained(
-            args.model_id,
-            quantization_config=bnb_config,
-            device_map={"": PartialState().process_index},
-            token=token,
-        )
-        ref_model.requires_grad_(False)
-
         training_args = DPOConfig(
             output_dir=args.output_dir,
             per_device_train_batch_size=args.micro_batch_size,
@@ -187,11 +190,11 @@ def main(args):
             beta=args.dpo_beta,  # DPO-specific: temperature parameter
             max_prompt_length=args.max_prompt_length,
             max_length=args.max_seq_length,
+            dataset_num_proc=None
         )
     
         trainer = DPOTrainer(
             model=model,
-            ref_model=ref_model,
             args=training_args,
             train_dataset=data,
             peft_config=lora_config,
