@@ -14,8 +14,7 @@ from transformers import (
     logging,
     set_seed,
 )
-from trl import SFTTrainer, SFTConfig
-
+from trl import SFTTrainer, SFTConfig, DPOTrainer, DPOConfig
 
 def get_args():
     parser = argparse.ArgumentParser()
@@ -30,7 +29,18 @@ def get_args():
     parser.add_argument("--micro_batch_size", type=int, default=1)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=4)
     parser.add_argument("--weight_decay", type=float, default=0.01)
-    parser.add_argument("--bf16", type=bool, default=True)
+    
+    parser.add_argument("--bf16", action="store_true")
+    parser.add_argument("--no_bf16", dest="bf16", action="store_false")
+    parser.set_defaults(bf16=True)
+    
+    parser.add_argument("--lora_r", type=int, default=64)
+    parser.add_argument("--lora_alpha", type=int, default=16)
+    parser.add_argument("--lora_dropout", type=float, default=0.05)
+    parser.add_argument("--training_type", type=str, default="sft", choices=["sft", "dpo"])
+
+    parser.add_argument("--dpo_beta", type=float, default=0.1)
+    parser.add_argument("--max_prompt_length", type=int, default=512)
 
     parser.add_argument("--attention_dropout", type=float, default=0.1)
     parser.add_argument("--learning_rate", type=float, default=2e-4)
@@ -39,7 +49,9 @@ def get_args():
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--output_dir", type=str, default="finetune_starcoder2")
     parser.add_argument("--num_proc", type=int, default=None)
-    parser.add_argument("--push_to_hub", type=bool, default=False)
+    
+    parser.add_argument("--push_to_hub", action="store_true")
+
     return parser.parse_args()
 
 
@@ -66,7 +78,9 @@ def main(args):
         bnb_4bit_compute_dtype=torch.bfloat16,
     )
     lora_config = LoraConfig(
-        r=8,
+        r=args.lora_r,
+        lora_alpha=args.lora_alpha,
+        lora_dropout=args.lora_dropout,
         target_modules=[
             "q_proj",
             "o_proj",
@@ -102,36 +116,72 @@ def main(args):
         num_proc=args.num_proc if args.num_proc else multiprocessing.cpu_count(),
     )
 
-    # Create SFTConfig with dataset-specific parameters
-    training_args = SFTConfig(
-        output_dir=args.output_dir,
-        per_device_train_batch_size=args.micro_batch_size,
-        gradient_accumulation_steps=args.gradient_accumulation_steps,
-        warmup_steps=args.warmup_steps,
-        max_steps=args.max_steps,
-        learning_rate=args.learning_rate,
-        lr_scheduler_type=args.lr_scheduler_type,
-        weight_decay=args.weight_decay,
-        bf16=args.bf16,
-        logging_strategy="steps",
-        logging_steps=10,
-        optim="paged_adamw_8bit",
-        seed=args.seed,
-        report_to="none",
-        # SFT-specific parameters
-        max_seq_length=args.max_seq_length,
-        dataset_text_field=args.dataset_text_field,
-        packing=False,
-    )
 
-    # setup the trainer - simplified parameters
-    trainer = SFTTrainer(
-        model=model,
-        args=training_args,
-        train_dataset=data,
-        peft_config=lora_config,
-        processing_class=tokenizer,
-    )
+    if args.training_type == "sft":
+        training_args = SFTConfig(
+            output_dir=args.output_dir,
+            per_device_train_batch_size=args.micro_batch_size,
+            gradient_accumulation_steps=args.gradient_accumulation_steps,
+            warmup_steps=args.warmup_steps,
+            max_steps=args.max_steps,
+            learning_rate=args.learning_rate,
+            lr_scheduler_type=args.lr_scheduler_type,
+            weight_decay=args.weight_decay,
+            bf16=args.bf16,
+            logging_strategy="steps",
+            logging_steps=10,
+            optim="paged_adamw_8bit",
+            seed=args.seed,
+            report_to="none",
+            # SFT-specific parameters
+            max_seq_length=args.max_seq_length,
+            dataset_text_field=args.dataset_text_field,
+            packing=False,
+        )
+        trainer = SFTTrainer(
+            model=model,
+            args=training_args,
+            train_dataset=data,
+            peft_config=lora_config,
+            processing_class=tokenizer,
+        )
+    else:
+        ref_model = AutoModelForCausalLM.from_pretrained(
+            args.model_id,
+            quantization_config=bnb_config,
+            device_map={"": PartialState().process_index},
+            token=token,
+        )
+        ref_model.requires_grad_(False)
+        
+        training_args = DPOConfig(
+            output_dir=args.output_dir,
+            per_device_train_batch_size=args.micro_batch_size,
+            gradient_accumulation_steps=args.gradient_accumulation_steps,
+            warmup_steps=args.warmup_steps,
+            max_steps=args.max_steps,
+            learning_rate=args.learning_rate,
+            lr_scheduler_type=args.lr_scheduler_type,
+            weight_decay=args.weight_decay,
+            bf16=args.bf16,
+            logging_strategy="steps",
+            logging_steps=10,
+            optim="paged_adamw_8bit",
+            seed=args.seed,
+            report_to="none",
+            beta=args.dpo_beta,  # DPO-specific: temperature parameter
+            max_prompt_length=args.max_prompt_length,
+            max_length=args.max_seq_length,
+        )
+    
+        trainer = DPOTrainer(
+            model=model,
+            ref_model=ref_model,
+            args=training_args,
+            train_dataset=data,
+            peft_config=lora_config,
+            processing_class=tokenizer,
+        )
 
     # launch
     print("Training...")
