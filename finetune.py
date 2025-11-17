@@ -130,6 +130,15 @@ def main(args):
         token=token,
         num_proc=args.num_proc if args.num_proc else multiprocessing.cpu_count(),
     )
+    if args.training_type == "sft" and "CodeAlpaca" in args.dataset_name:
+        def format_codealpaca(example):
+            text = f"{example['prompt']}{example['completion']}"
+            return {"text": text}
+        
+        data = data.map(format_codealpaca, remove_columns=data.column_names)
+        args.dataset_text_field = "text"
+        print("Formatted CodeAlpaca dataset")
+        print("Sample:", data[0]["text"][:200])
 
     if args.training_type == "dpo" and args.dataset_name == "coseal/CodeUltraFeedback_binarized":
         def format_dpo_dataset(example):
