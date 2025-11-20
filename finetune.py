@@ -6,7 +6,7 @@ import os
 import torch
 from accelerate import PartialState
 from datasets import load_dataset
-from peft import LoraConfig
+from peft import LoraConfig, PeftModel
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
@@ -52,6 +52,7 @@ def get_args():
     parser.add_argument("--num_proc", type=int, default=None)
     
     parser.add_argument("--push_to_hub", action="store_true")
+    parser.add_argument("--merge", action="store_true")
 
     parser.add_argument("--use_wandb", action="store_true", help="Enable Weights & Biases logging")
 
@@ -222,7 +223,36 @@ def main(args):
     print("Saving the last checkpoint of the model")
     model.save_pretrained(os.path.join(args.output_dir, "final_checkpoint/"))
     if args.push_to_hub:
-        trainer.push_to_hub("Upload model")
+        if args.merge:
+            print("Merging LoRA adapters with base model...")
+            print("Loading base model in bf16...")
+            base_model = AutoModelForCausalLM.from_pretrained(
+                args.model_id,
+                torch_dtype=torch.bfloat16,
+                device_map="auto",
+                token=token,
+            )
+            
+            print("Loading LoRA adapters...")
+            merged_model = PeftModel.from_pretrained(
+                base_model,
+                os.path.join(args.output_dir, "final_checkpoint/")
+            )
+            
+            print("Merging...")
+            merged_model = merged_model.merge_and_unload()
+            
+            print("Uploading full merged model to Hub...")
+            merged_model.push_to_hub(
+                repo_id=f"{args.output_dir}-merged",
+                commit_message="Upload merged model"
+            )
+            tokenizer.push_to_hub(
+                repo_id=f"{args.output_dir}-merged",
+                commit_message="Upload tokenizer"
+            )
+        else:
+            trainer.push_to_hub("Upload model")
     if args.use_wandb:
         wandb.finish()
 
