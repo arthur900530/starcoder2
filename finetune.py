@@ -115,14 +115,7 @@ def main(args):
     
     print_trainable_parameters(model)
 
-    if args.use_wandb:
-        wandb.init(
-            project=args.wandb_project,
-            name=args.wandb_run_name,
-            entity=args.wandb_entity,
-            config=vars(args),  # Log all hyperparameters
-        )
-
+    # load data
     data = load_dataset(
         args.dataset_name,
         args.subset,
@@ -130,6 +123,8 @@ def main(args):
         token=token,
         num_proc=args.num_proc if args.num_proc else multiprocessing.cpu_count(),
     )
+
+    # data preprocess
     if args.training_type == "sft" and "CodeAlpaca" in args.dataset_name:
         def format_codealpaca(example):
             text = f"{example['prompt']}{example['completion']}"
@@ -152,7 +147,7 @@ def main(args):
         print("Preprocessed DPO dataset columns:", data.column_names)
         print("Sample:", data[0])
 
-
+    # setup training
     if args.training_type == "sft":
         training_args = SFTConfig(
             output_dir=args.output_dir,
@@ -169,6 +164,7 @@ def main(args):
             optim="paged_adamw_8bit",
             seed=args.seed,
             report_to="wandb" if args.use_wandb else "none",
+            gradient_checkpointing_kwargs={"use_reentrant": False},
             # SFT-specific parameters
             dataset_text_field=args.dataset_text_field,
             packing=False,
@@ -196,10 +192,12 @@ def main(args):
             optim="paged_adamw_8bit",
             seed=args.seed,
             report_to="wandb" if args.use_wandb else "none",
-            beta=args.dpo_beta,  # DPO-specific: temperature parameter
             max_prompt_length=args.max_prompt_length,
             max_length=args.max_seq_length,
-            dataset_num_proc=None
+            dataset_num_proc=None,
+            gradient_checkpointing_kwargs={"use_reentrant": False},
+            # DPO-specific parameters
+            beta=args.dpo_beta,
         )
     
         trainer = DPOTrainer(
@@ -211,6 +209,13 @@ def main(args):
         )
 
     # launch
+    if args.use_wandb:
+        wandb.init(
+            project=args.wandb_project,
+            name=args.wandb_run_name,
+            entity=args.wandb_entity,
+            config=vars(args),  # Log all hyperparameters
+        )
     print("Training...")
     trainer.train()
 
