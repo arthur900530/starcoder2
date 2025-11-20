@@ -221,7 +221,7 @@ def main(args):
     trainer.train()
 
     print("Saving the last checkpoint of the model")
-    model.save_pretrained(os.path.join(args.output_dir, "final_checkpoint/"))
+    trainer.save_model(os.path.join(args.output_dir, "final_checkpoint"))
     if args.push_to_hub:
         if args.merge:
             print("Merging LoRA adapters with base model...")
