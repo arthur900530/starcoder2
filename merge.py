@@ -1,15 +1,11 @@
 """
-Merge LoRA adapter with base model and optionally upload to HuggingFace Hub.
-
-Usage:
-    python merge.py --adapter_repo your-username/model-adapter --output_repo your-username/model-merged
-    python merge.py --adapter_repo your-username/model-adapter --output_dir ./local_merged_model
+Merge LoRA adapter with base model (FULL PRECISION).
 """
 
 import argparse
 import torch
-from peft import AutoPeftModelForCausalLM
-from transformers import AutoTokenizer
+from peft import PeftModel
+from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig
 from huggingface_hub import login
 import gc
 import os
@@ -21,75 +17,64 @@ def get_args():
         "--adapter_repo",
         type=str,
         required=True,
-        help="HuggingFace repo containing the LoRA adapter (e.g., 'username/model-adapter')"
+        help="HuggingFace repo containing the LoRA adapter"
+    )
+    parser.add_argument(
+        "--base_model",
+        type=str,
+        default="bigcode/starcoder2-3b",
+        help="Base model to merge with (full precision)"
     )
     parser.add_argument(
         "--output_repo",
         type=str,
         default=None,
-        help="HuggingFace repo to upload merged model (e.g., 'username/model-merged'). If not provided, only saves locally."
+        help="HuggingFace repo to upload merged model"
     )
     parser.add_argument(
         "--output_dir",
         type=str,
         default="./merged_model",
-        help="Local directory to save merged model (default: './merged_model')"
-    )
-    parser.add_argument(
-        "--load_in_8bit",
-        action="store_true",
-        help="Load model in 8-bit to save memory (useful for large models)"
+        help="Local directory to save merged model"
     )
     parser.add_argument(
         "--private",
         action="store_true",
-        help="Make the uploaded model private on HuggingFace Hub"
-    )
-    parser.add_argument(
-        "--token",
-        type=str,
-        default=None,
-        help="HuggingFace token (optional, will prompt if not provided and uploading)"
+        help="Make the uploaded model private"
     )
     
     return parser.parse_args()
 
 
 def merge_and_save(args):
-    """Merge LoRA adapter with base model and save/upload"""
+    """Merge LoRA adapter with base model in FULL PRECISION"""
     
-    # Login to HuggingFace if uploading
     if args.output_repo:
-        if args.token:
-            login(token=args.token)
-        else:
-            print("Please login to HuggingFace:")
-            login()
+        print("Logging in to HuggingFace...")
+        login()
     
-    print(f"Loading adapter from {args.adapter_repo}...")
+    print(f"Loading BASE MODEL in FULL PRECISION from {args.base_model}...")
+    # Load base model in FULL PRECISION (bf16, not quantized)
+    base_model = AutoModelForCausalLM.from_pretrained(
+        args.base_model,
+        torch_dtype=torch.bfloat16,  # Full precision bf16
+        device_map="auto",
+        low_cpu_mem_usage=True,
+    )
     
-    # Load model with adapter
-    load_kwargs = {
-        "device_map": "auto",
-        "low_cpu_mem_usage": True,
-    }
-    
-    if args.load_in_8bit:
-        print("Loading in 8-bit mode to save memory...")
-        load_kwargs["load_in_8bit"] = True
-    else:
-        load_kwargs["torch_dtype"] = torch.bfloat16
-    
-    model = AutoPeftModelForCausalLM.from_pretrained(
+    print(f"Loading LoRA adapter from {args.adapter_repo}...")
+    # Load adapter on top of full precision model
+    model = PeftModel.from_pretrained(
+        base_model,
         args.adapter_repo,
-        **load_kwargs
+        torch_dtype=torch.bfloat16,
     )
     
     print("Merging adapter with base model...")
     merged_model = model.merge_and_unload()
     
-    # Free up memory
-    del model
+    # Free memory
+    del model, base_model
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
     gc.collect()
@@ -98,17 +83,16 @@ def merge_and_save(args):
     tokenizer = AutoTokenizer.from_pretrained(args.adapter_repo)
     
     # Save locally
-    print(f"Saving merged model to {args.output_dir}...")
+    print(f"Saving merged FULL PRECISION model to {args.output_dir}...")
     os.makedirs(args.output_dir, exist_ok=True)
     merged_model.save_pretrained(args.output_dir)
     tokenizer.save_pretrained(args.output_dir)
-    print(f"✓ Saved locally to {args.output_dir}")
-    
-    # Upload to HuggingFace Hub if requested
+
+    # Upload if requested
     if args.output_repo:
         print(f"Uploading merged model to {args.output_repo}...")
         
-        # Move to CPU if on GPU to avoid memory issues during upload
+        # Move to CPU if on GPU
         if next(merged_model.parameters()).is_cuda:
             print("Moving model to CPU for upload...")
             merged_model = merged_model.cpu()
@@ -117,15 +101,11 @@ def merge_and_save(args):
         
         merged_model.push_to_hub(
             args.output_repo,
-            commit_message="Upload merged model",
+            commit_message="Upload FULL PRECISION merged model",
             private=args.private,
         )
         
-        tokenizer.push_to_hub(
-            args.output_repo,
-            commit_message="Upload tokenizer",
-            private=args.private,
-        )
+        tokenizer.push_to_hub(args.output_repo, private=args.private)
         
         print(f"✓ Uploaded to: https://huggingface.co/{args.output_repo}")
     
@@ -134,11 +114,6 @@ def merge_and_save(args):
 
 def main():
     args = get_args()
-    
-    # Validate arguments
-    if not args.output_repo and not args.output_dir:
-        raise ValueError("Must provide either --output_repo or --output_dir")
-    
     merge_and_save(args)
 
 
