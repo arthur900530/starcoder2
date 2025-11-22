@@ -222,9 +222,16 @@ def main(args):
 
     print("Saving the last checkpoint of the model")
     trainer.save_model(os.path.join(args.output_dir, "final_checkpoint"))
+    
     if args.push_to_hub:
         if args.merge:
             print("Merging LoRA adapters with base model...")
+            
+            # Clean up training model to free memory
+            del model
+            del trainer
+            torch.cuda.empty_cache()
+            
             print("Loading base model in bf16...")
             base_model = AutoModelForCausalLM.from_pretrained(
                 args.model_id,
@@ -234,20 +241,54 @@ def main(args):
             )
             
             print("Loading LoRA adapters...")
-            merged_model = PeftModel.from_pretrained(
+            peft_model = PeftModel.from_pretrained(
                 base_model,
-                os.path.join(args.output_dir, "final_checkpoint/")
+                os.path.join(args.output_dir, "final_checkpoint"),
+                torch_dtype=torch.bfloat16,
             )
             
             print("Merging...")
-            merged_model = merged_model.merge_and_unload()
+            merged_model = peft_model.merge_and_unload()
             
-            print("Uploading full merged model to Hub...")
             # Extract base name from output_dir to avoid namespace issues
             base_name = os.path.basename(args.output_dir.rstrip('/'))
             repo_name = f"{base_name}-merged"
             
-            merged_model.push_to_hub(
+            # Save locally first to ensure clean state
+            temp_save_path = os.path.join(args.output_dir, "merged_model")
+            print(f"Saving merged model to {temp_save_path}...")
+            
+            # Get state dict and save without PEFT attributes
+            state_dict = merged_model.state_dict()
+            
+            # Clean up PEFT model references
+            del peft_model
+            del base_model
+            torch.cuda.empty_cache()
+            
+            # Reload as clean transformers model
+            print("Reloading as clean transformers model...")
+            clean_model = AutoModelForCausalLM.from_pretrained(
+                args.model_id,
+                torch_dtype=torch.bfloat16,
+                device_map="auto",
+                token=token,
+            )
+            
+            # Load merged weights
+            clean_model.load_state_dict(state_dict, strict=False)
+            
+            # Clean up temporary objects
+            del merged_model
+            del state_dict
+            torch.cuda.empty_cache()
+            
+            # Save the clean model
+            clean_model.save_pretrained(temp_save_path)
+            tokenizer.save_pretrained(temp_save_path)
+            
+            print(f"Pushing to hub as {repo_name}...")
+            clean_model.push_to_hub(
                 repo_id=repo_name,
                 commit_message="Upload merged model",
                 token=token,
@@ -257,8 +298,11 @@ def main(args):
                 commit_message="Upload tokenizer",
                 token=token,
             )
+            
+            print(f"✓ Model uploaded successfully to: https://huggingface.co/{repo_name}")
         else:
             trainer.push_to_hub("Upload model")
+            
     if args.use_wandb:
         wandb.finish()
 
