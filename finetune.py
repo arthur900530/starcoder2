@@ -243,13 +243,19 @@ def main(args):
             merged_model = merged_model.merge_and_unload()
             
             print("Uploading full merged model to Hub...")
+            # Extract base name from output_dir to avoid namespace issues
+            base_name = os.path.basename(args.output_dir.rstrip('/'))
+            repo_name = f"{base_name}-merged"
+            
             merged_model.push_to_hub(
-                repo_id=f"{args.output_dir}-merged",
-                commit_message="Upload merged model"
+                repo_id=repo_name,
+                commit_message="Upload merged model",
+                token=token,
             )
             tokenizer.push_to_hub(
-                repo_id=f"{args.output_dir}-merged",
-                commit_message="Upload tokenizer"
+                repo_id=repo_name,
+                commit_message="Upload tokenizer",
+                token=token,
             )
         else:
             trainer.push_to_hub("Upload model")
